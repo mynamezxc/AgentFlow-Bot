@@ -531,3 +531,29 @@ dialog.lightbox::backdrop{background:#0a0e1be8;backdrop-filter:none}
 .live-work.is-stuck,.live-work.is-stuck .reltime{color:var(--warning)}.live-work.is-stuck .working-orb{background:var(--warning)}.live-work.is-stalled,.live-work .reltime.is-stalled{color:var(--warning)}.live-work.is-stalled .working-orb{background:var(--warning)}
 .roster-person small .roster-age{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
 .usage-mini-window.is-stale{opacity:.72}
+
+/* === work log: team rows, tool-call summaries, long notes (all collapsed by default) === */
+.work-log li.wl-team,.work-log li.wl-calls,.work-log li.wl-note.wl-long,.work-log li.wl-more{display:block}
+.work-log .wl-team details>summary,.work-log .wl-calls details>summary,.work-log .wl-long details>summary{display:flex;align-items:center;gap:6px;cursor:pointer;list-style:none;min-width:0;padding:2px 4px;border-radius:6px;overflow:hidden}
+.work-log .wl-team details>summary::-webkit-details-marker,.work-log .wl-calls details>summary::-webkit-details-marker,.work-log .wl-long details>summary::-webkit-details-marker{display:none}
+.work-log .wl-team details>summary:hover,.work-log .wl-calls details>summary:hover,.work-log .wl-long details>summary:hover{background:color-mix(in srgb,currentColor 7%,transparent)}
+.work-log .wl-line{display:flex;align-items:center;gap:6px;min-width:0;padding:2px 4px}
+.work-log .wl-route{flex:none;display:inline-flex;align-items:center;gap:4px;font-weight:600}
+.work-log .wl-text,.work-log .wl-tools{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.work-log .wl-tools{opacity:.75}
+.work-log .wl-count{flex:none;font-weight:600}
+.work-log .wl-team time,.work-log .wl-calls details>summary time,.work-log .wl-long time{flex:none;opacity:.7}
+.work-log .wl-calls svg{width:12px;height:12px;flex:none;transform:none}
+.work-log .wl-full{margin:4px 0 2px 18px;max-height:320px;overflow:auto;overflow-wrap:anywhere;font-size:12.5px}
+.work-log .wl-call-list{list-style:none;margin:4px 0 2px 18px;padding:0;max-height:240px;overflow:auto;display:grid;gap:2px}
+.work-log .wl-call-list li{display:flex;align-items:baseline;gap:8px;min-width:0;font-size:11.5px}
+.work-log .wl-call-list code{flex:none;background:none;padding:0}
+.work-log .wl-call-list span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.8}
+.work-log .wl-call-list li.is-error em{font-style:normal;color:var(--danger,#c0392b)}
+.work-log .wl-call-list time{flex:none;opacity:.6}
+.work-log .avatar.mini,.work-log .avatar.agent-face.mini{width:16px;height:16px;min-width:16px;font-size:8px;border-radius:6px}
+.work-log .wl-more .link-button{font:inherit;font-size:11.5px;padding:2px 6px;border:0;background:none;color:var(--accent,#6d4aff);cursor:pointer}
+.load-earlier{display:flex;justify-content:center;padding:4px 0 14px}
+.load-earlier .button{min-height:32px}
+/* Off-screen messages are not laid out or painted until scrolled near (a long transcript otherwise costs the first paint and every repaint). */
+.co-transcript .transcript-inner>.co-message,.co-transcript .transcript-inner>.work-log{content-visibility:auto;contain-intrinsic-size:auto 96px}

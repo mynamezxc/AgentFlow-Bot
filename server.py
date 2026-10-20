@@ -1,5 +1,8 @@
 """Start with Python 3.12+: python server.py --port 8765 (no packages required)."""
+from agentflow import __version__
 import argparse
+import gzip
+import hashlib
 import hmac
 import json
 import mimetypes
@@ -16,6 +19,7 @@ from agentflow.engine import Engine
 from agentflow.heartbeat import DEFAULTS as HEARTBEAT_DEFAULTS
 from agentflow.providers import Providers, Vault
 from agentflow.service import SECRETS, Service
+from agentflow.statefeed import StateFeed, gz
 from agentflow.store import DomainError, Store, initial_seed
 
 ROOT = Path(__file__).resolve().parent
@@ -62,6 +66,23 @@ def make_handler(service, session_token, port):
     origins = {"http://" + host for host in hosts}
     public_webhook = os.getenv("PUBLIC_WEBHOOK_HOST", "").strip()
 
+    def runtime_block():
+        runtime = {"mode": "local", "heartbeat_at": engine.last_heartbeat,
+                   "providers": providers.status(), "models": engine.models.catalog(),
+                   "secrets": {key: bool(vault.get(key)) for key in SECRETS},
+                   "credential_persistence": vault.persistence,
+                   "workspace": str(engine.workspace)}
+        runtime["plugins"] = engine.plugins.owner_state()
+        runtime["telegram"] = engine.telegram.public_status()
+        runtime["heartbeat"] = engine.heartbeat_status()
+        runtime["heartbeat_config"] = engine.heartbeat.config()
+        runtime["heartbeat_defaults"] = HEARTBEAT_DEFAULTS
+        return runtime
+
+    feed = StateFeed(store, runtime_block)
+    static_cache = {}   # path -> ((mtime_ns, size), raw, gzip or None, etag)
+    compressible = ("text/", "application/json", "image/svg+xml", "application/javascript")
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "AgentFlow"
         sys_version = ""
@@ -69,19 +90,55 @@ def make_handler(service, session_token, port):
         def log_message(self, fmt, *args):
             return
 
-        def send(self, data, code=200, content_type="application/json; charset=utf-8", cookie=False, canvas=False, frame=False):
-            raw = json.dumps(data, ensure_ascii=False).encode() if "application/json" in content_type else data
-            self.send_response(code)
+        def accepts_gzip(self):
+            for part in self.headers.get("Accept-Encoding", "").split(","):
+                name, _, params = part.strip().partition(";")
+                if name.strip().lower() in ("gzip", "x-gzip"):
+                    return params.replace(" ", "").lower() not in ("q=0", "q=0.0", "q=0.00", "q=0.000")
+            return False
+
+        def not_modified(self, etag):
+            seen = [t.strip() for t in self.headers.get("If-None-Match", "").split(",") if t.strip()]
+            return bool(etag) and ("*" in seen or any(t == etag or t == "W/" + etag for t in seen))
+
+        def send(self, data, code=200, content_type="application/json; charset=utf-8", cookie=False, canvas=False, frame=False,
+                 etag=None, packed=None):
+            """`etag` turns on revalidation (304 when If-None-Match matches); `packed` is the gzip form of `data` when one is cached."""
+            raw = json.dumps(data, ensure_ascii=False).encode() if "application/json" in content_type and not isinstance(data, bytes) else data
+            body, encoding = raw, None
+            if code == 200 and not canvas and not frame and len(raw) > 1024 and self.accepts_gzip() and content_type.startswith(compressible):
+                body, encoding = packed if packed is not None else gz(raw), "gzip"
+            unchanged = code == 200 and self.not_modified(etag)
+            self.send_response(304 if unchanged else code)
             self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Cache-Control", "no-store" if self.path.startswith("/api") else "no-cache")
+            if not unchanged:
+                self.send_header("Content-Length", str(len(body)))
+            if encoding and not unchanged:
+                self.send_header("Content-Encoding", encoding)
+            self.send_header("Vary", "Accept-Encoding")
+            if etag:
+                self.send_header("ETag", etag)
+            self.send_header("Cache-Control", ("private, no-cache" if self.path.startswith("/api") else "no-cache") if etag else "no-store" if self.path.startswith("/api") else "no-cache")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "same-origin")
             self.send_header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'" if canvas else "default-src 'none'; frame-ancestors 'self'" if frame else "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
             if cookie:
                 self.send_header("Set-Cookie", f"af_session={session_token}; HttpOnly; SameSite=Strict; Path=/")
             self.end_headers()
-            self.wfile.write(raw)
+            if not unchanged:
+                self.wfile.write(body)
+
+        def static(self, target, content_type):
+            """A dist file with an ETag (and a cached gzip form); index.html is never answered with 304 because it sets the session cookie."""
+            info = target.stat()
+            stamp = (info.st_mtime_ns, info.st_size)
+            entry = static_cache.get(str(target))
+            if not entry or entry[0] != stamp:
+                raw = target.read_bytes()
+                entry = (stamp, raw, gz(raw) if len(raw) > 1024 and content_type.startswith(compressible) else None, '"%s"' % hashlib.sha1(raw).hexdigest()[:20])
+                static_cache[str(target)] = entry
+            home = target.name == "index.html"
+            return self.send(entry[1], content_type=content_type, cookie=home, etag=None if home else entry[3], packed=entry[2])
 
         def authorized(self):
             cookie = SimpleCookie()
@@ -122,20 +179,27 @@ def make_handler(service, session_token, port):
                 if path.startswith("/api/"):
                     self.authorized()
                     if path == "/api/health":
-                        return self.send({"ok": True, "mode": "local", "version": "0.3.0"})
-                    if path in ("/api/state", "/api/export"):
+                        return self.send({"ok": True, "mode": "local", "version": __version__})
+                    if path == "/api/state":
+                        state = feed.respond(parse_qs(parsed.query).get("since", [""])[0][:64])
+                        return self.send(state["raw"], content_type="application/json; charset=utf-8", etag=state["etag"], packed=state["gzip"])
+                    if path == "/api/export":   # the whole workspace, never slimmed
                         snapshot = store.snapshot()
-                        snapshot["runtime"] = {"mode": "local", "heartbeat_at": engine.last_heartbeat,
-                                               "providers": providers.status(), "models": engine.models.catalog(),
-                                               "secrets": {key: bool(vault.get(key)) for key in SECRETS},
-                                               "credential_persistence": vault.persistence,
-                                               "workspace": str(engine.workspace)}
-                        snapshot["runtime"]["plugins"] = engine.plugins.owner_state()
-                        snapshot["runtime"]["telegram"] = engine.telegram.public_status()
-                        snapshot["runtime"]["heartbeat"] = engine.heartbeat_status()
-                        snapshot["runtime"]["heartbeat_config"] = engine.heartbeat.config()
-                        snapshot["runtime"]["heartbeat_defaults"] = HEARTBEAT_DEFAULTS
+                        snapshot["runtime"] = runtime_block()
                         return self.send(snapshot)
+                    if path == "/api/messages":
+                        query = parse_qs(parsed.query)
+                        channel = query.get("channel", [""])[0][:200]
+                        if not channel:
+                            raise DomainError("A channel is required.")
+                        items, more = store.messages_page(channel, query.get("before", [""])[0][:100] or None, query.get("limit", ["100"])[0])
+                        return self.send({"messages": items, "more": more})
+                    if path.startswith("/api/runs/") and path.endswith("/events"):
+                        parts = path.strip("/").split("/")
+                        if len(parts) != 4:
+                            raise DomainError("Unknown run endpoint.", 404)
+                        store.get("runs", parts[2])
+                        return self.send({"events": feed.run_events(parts[2], parse_qs(parsed.query).get("limit", ["200"])[0])})
                     if path == "/api/storage":
                         return self.send(engine.housekeeping.report())
                     if path == "/api/models/history":
@@ -195,7 +259,9 @@ def make_handler(service, session_token, port):
                 content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
                 if target.suffix == ".js":
                     content_type = "text/javascript"
-                return self.send(target.read_bytes(), content_type=content_type, cookie=target.name == "index.html")
+                if path.startswith("/media/"):
+                    return self.send(target.read_bytes(), content_type=content_type)
+                return self.static(target, content_type)
             except DomainError as exc:
                 self.send({"error": str(exc)}, exc.status)
             except (ValueError, TypeError):

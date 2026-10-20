@@ -641,7 +641,10 @@ class Engine(Channels):
         """Bounded per-run log feeding the compact checkpoint: one line per tool call and a few progress notes."""
         log = run.get("work_log") or self.builder().derived_log(run.get("trace", []))
         notes = log.get("notes", [])
-        return {"calls": (log.get("calls", []) + list(calls))[-80:], "notes": (notes + [note] if note else notes)[-40:]}
+        stamp = now()   # new entries carry `at` (ISO); older ones are shown with the run's own times
+        calls = [{**c, "at": c.get("at") or stamp} for c in calls]
+        note = {**note, "at": note.get("at") or stamp} if note else None
+        return {"calls": (log.get("calls", []) + calls)[-80:], "notes": (notes + [note] if note else notes)[-40:]}
 
     def propose_plan(self, actor, data, run=None):
         run = run or {"id": uid("manual"), "channel": "dm-" + actor["id"], "project_id": None}
@@ -1243,9 +1246,7 @@ class Engine(Channels):
         self.dispatch_outbox()
         submitted = []
         limit = min(8, max(1, int(self.store.settings().get("max_parallel", 4))))
-        for run in self.store.all("runs"):
-            if run["status"] != "queued":
-                continue
+        for run in self.store.find("runs", "status", ("queued",)):   # SQLite filters: parsing every run's trace twice a second made the runtime sluggish
             if self.safety.halted(run):
                 continue
             if self.quota.gate(run):

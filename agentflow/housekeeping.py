@@ -465,6 +465,7 @@ class Housekeeping:
                 run.update(trace=[], pending_calls=[], operation_fingerprints=[], housekeeping_trimmed=True)
                 self.store.conn.execute("UPDATE records SET payload=? WHERE kind='runs' AND id=?",
                                         (json.dumps(run, ensure_ascii=False), run_id))
+                self.store.mark_changed('runs', run_id)
                 trimmed += 1
             if index % 50 == 49:
                 time.sleep(0.01)
@@ -480,6 +481,7 @@ class Housekeeping:
                 event.update(result={"truncated": True, "original_bytes": len(text), "preview": text[:1500]}, housekeeping_trimmed=True)
                 self.store.conn.execute("UPDATE records SET payload=? WHERE kind='tool_events' AND id=?",
                                         (json.dumps(event, ensure_ascii=False), event_id))
+                self.store.mark_changed('tool_events', event_id)
                 trimmed += 1
             if index % 50 == 49:
                 time.sleep(0.01)

@@ -59,6 +59,7 @@ export function formatMessage(value='',agents=[],artifacts=[]) {
   return html+esc(content.slice(offset));
 }
 export function ownerVisible(message,runs=[]) {
-  if(message.audience) return message.audience==='owner';
+  // "activity" messages (step narration, auto-approved actions) render only inside the collapsed work log; "internal" stays hidden.
+  if(message.audience) return message.audience==='owner'||message.audience==='activity';
   return !['peer','handoff','peer_reply'].includes(message.kind)&&!(runs.find(r=>r.id===message.run_id)?.kind==='peer'&&message.kind!=='decision');
 }

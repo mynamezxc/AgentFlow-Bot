@@ -344,8 +344,8 @@ class Heartbeat:
         cfg = self.config()
         at = datetime.now(timezone.utc)
         state = self.state()
-        runs = self.store.all("runs")
-        count = lambda *names: sum(1 for r in runs if r["status"] in names)
+        counts = self.store.count_by("runs", "status")
+        count = lambda *names: sum(counts.get(name, 0) for name in names)
         result = state.get("last_result")
         if result == "started":
             try:

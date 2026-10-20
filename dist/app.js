@@ -7,6 +7,9 @@ import {createSettingsPanels} from './settings-panels.js';
 import {createHeartbeat} from './heartbeat-ui.js';
 import {createImageSettings,configureImageStudio,openImageStudio,imageSettingsSummary} from './image-studio.js';
 import {telegramLabel,telegramBody,telegramSettings} from './telegram-ui.js';
+import {mergeState,pollDelay,loadCachedState,saveCachedState,cacheable} from './state-sync.js';
+// The web fonts load without blocking the first paint (index.html leaves the stylesheet on media=print until now).
+document.getElementById('web-fonts')?.setAttribute('media','all');
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = (value = '') => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -67,7 +70,7 @@ states.blocked_account='Account sign-in required';
 states.waiting_quota='Waiting for account quota';
 let data, mode, route = 'chat', search = new URLSearchParams(location.search).get('q') || '', filter = new URLSearchParams(location.search).get('filter') || 'all';
 let page = 1, taskView = 'board', chatRoom = 'dm-a-lead', chatAgent = 'a-lead', weekOffset = 0, knowledgeScope = 'all', skillsTab = 'all';
-let appError = '', searchTimer, toastTimer, opener, modalDirty = false, lastSignature = '', refreshBusy = false;
+let appError = '', searchTimer, toastTimer, opener, modalDirty = false, lastSignature = '', inflight = null;
 const modal = $('#modal');
 const agent = id => data.agents.find(a => a.id === id) || {id, name:'Unassigned',avatar:'?',color:'slate',role:''};
 const visible = kind => (data[kind] || []).filter(x => !x.archived && !x.sample);
@@ -137,20 +140,43 @@ async function demoApi(path,body={},method) {
   persistDemo();
   return {ok:true};
 }
+const OPTIONAL_KINDS=['projects','decisions','tool_events','artifacts','skill_versions','agent_revisions','plugin_accounts','custom_tools'];
+const withDefaults=state=>{for(const kind of OPTIONAL_KINDS) state[kind] ||= [];return state;};
+// Poll bookkeeping: when anything last changed (drives the poll rate), failures in a row (backs off), the revision+runtime stamp (skips idle renders).
+let lastChangeAt=Date.now(), pollFailures=0, stateStamp='', runtimeVersion=0, pollTimer=0, cacheDirty=false, cacheSavedAt=0;
+const REFRESH_KINDS=new Set(['runs','tasks','agents']);   // non-chat pages only repaint when one of these changed
+async function loadState() {
+  const since=data?.rev?'?since='+encodeURIComponent(data.rev):'';
+  const response = await fetch('/api/state'+since,{signal:AbortSignal.timeout(15000)});
+  const result = await response.json();
+  if(!response.ok) throw new Error(result.error);
+  const before=data?.runtime?JSON.stringify(data.runtime):'';
+  let changed=true, kinds=null;
+  if(result.full||!data) data=withDefaults(result);
+  else {const merged=mergeState(data,result);changed=merged.changed;kinds=merged.kinds;}
+  const runtimeChanged=JSON.stringify(data.runtime||{})!==before;
+  if(runtimeChanged) runtimeVersion++;
+  stateStamp=data.rev+'|'+runtimeVersion;   // identical stamps mean nothing on screen can differ
+  if(changed||runtimeChanged) {lastChangeAt=Date.now();cacheDirty=true;}
+  delete data.cached;
+  return {ok:true,full:!!result.full,changed,kinds,runtimeChanged};
+}
 async function refresh(render=true) {
-  if(mode === 'demo') { refreshCategories();if(render) renderMain(); return; }
-  if(refreshBusy) return;
-  refreshBusy = true;
+  if(mode === 'demo') { refreshCategories();if(render) renderMain(); return {ok:true,changed:true}; }
+  while(inflight) await inflight.catch(()=>{});
   try {
-    const response = await fetch('/api/state',{signal:AbortSignal.timeout(15000)});
-    const result = await response.json();
-    if(!response.ok) throw new Error(result.error);
-    data = result; refreshCategories(); appError = '';
+    inflight=loadState();
+    const result=await inflight;
+    pollFailures=0;appError='';
+    if(result.changed||result.full) refreshCategories();
     if(render) renderMain();
+    return result;
   } catch(error) {
+    pollFailures++;
     appError = error.message || 'Unable to load runtime data. Try reloading.';
     if(render) renderMain();
-  } finally {refreshBusy=false;}
+    return {ok:false,error};
+  } finally {inflight=null;}
 }
 function syncQuery() {
   const url = new URL(location.href);
@@ -636,7 +662,7 @@ async function waitForRuntime() {
   await pause(3000);
   while(Date.now()-started<120000) {
     try {
-      const response=await fetch('/api/state',{signal:AbortSignal.timeout(3000)});
+      const response=await fetch('/api/health',{signal:AbortSignal.timeout(3000)});
       if(response.ok&&(wasDown||Date.now()-started>30000)) {location.reload();return;}
     } catch {wasDown=true;}
     await pause(2000);
@@ -784,7 +810,14 @@ async function perform(action,id,target) {
           result.files.length?'<div class="result-box">'+result.files.map(f=>esc(f.path)+' · '+f.bytes+' bytes').join('\n')+'</div>':empty('No files','Add brief.md and documents to workspaces/company.'));break;
       }
       case 'export': {
-        const snapshot=structuredClone(data);delete snapshot.runtime;
+        // The page only holds a slim copy of the state; the full workspace comes from /api/export.
+        let snapshot;
+        if(mode==='local') {
+          const response=await fetch('/api/export',{signal:AbortSignal.timeout(120000)});
+          if(!response.ok) throw new Error('Unable to export the workspace.');
+          snapshot=await response.json();
+        } else snapshot=structuredClone(data);
+        delete snapshot.runtime;delete snapshot.rev;delete snapshot.meta;
         const blob=new Blob([JSON.stringify(snapshot,null,2)],{type:'application/json'});
         const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='agentflow-workspace-'+new Date().toISOString().slice(0,10)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Data exported without secrets.');break;
       }
@@ -870,11 +903,27 @@ window.addEventListener('hashchange',()=>{
 matchMedia('(max-width:760px)').addEventListener('change',event=>{
   const nav=$('.sidebar');if(nav) nav.inert=event.matches&&!nav.classList.contains('open');
 });
+const CACHE_KEY='state:'+location.origin;
+const routeOfHash=()=>location.hash.slice(1).split('/')[0]||'chat';
+/** Repaint after a state response: chat updates in place (draft and scroll stay), other pages morph. */
+function paint(result,{poll=false}={}) {
+  if(!result||!result.ok) {if(result) renderMain();return;}
+  if(route==='chat') co.update(poll?{poll:true,stamp:stateStamp}:undefined);
+  else if(!modal.open&&!document.activeElement?.closest('form')&&(result.full||result.runtimeChanged||(result.kinds||[]).some(k=>REFRESH_KINDS.has(k)))) renderMain();
+}
 async function boot() {
   try {
+    // A copy of the last state paints the workspace at once; the network then only has to send what changed since.
+    const cached=await Promise.race([loadCachedState(CACHE_KEY),new Promise(resolve=>setTimeout(resolve,400,null))]);
+    if(cached?.rev&&cached.agents&&cached.settings) {
+      data=withDefaults(cached);data.cached=true;mode='local';route=routeOfHash();
+      refreshCategories();shell();
+      paint(await refresh(false));
+      return;
+    }
     const response=await fetch('/api/state',{signal:AbortSignal.timeout(10000)});
     const json=response.headers.get('content-type')?.includes('application/json');
-    if(response.ok&&json) {data=await response.json();mode='local';}
+    if(response.ok&&json) {data=withDefaults(await response.json());mode='local';stateStamp=data.rev+'|0';cacheDirty=true;}
     else if(response.status===404||response.status===405||(response.ok&&!json)) {
       const seedResponse=await fetch('/seed.json');
       if(!seedResponse.ok) throw new Error('Unable to load initial data.');
@@ -888,8 +937,8 @@ async function boot() {
       const error=json?await response.json():{};
       throw new Error(error.error||'Unable to open the runtime. Reload to start a new session.');
     }
-    route=location.hash.slice(1).split('/')[0]||'chat';
-    for(const kind of ['projects','decisions','tool_events','artifacts','skill_versions','agent_revisions','plugin_accounts','custom_tools']) data[kind] ||= [];
+    route=routeOfHash();
+    withDefaults(data);
     refreshCategories();
     shell();
   } catch(error) {
@@ -897,13 +946,32 @@ async function boot() {
     $('#boot-retry').addEventListener('click',boot);
   }
 }
-setInterval(async()=>{
-  if(mode!=='local'||!data||document.hidden||refreshBusy) return;
-  const stateSignature=()=>JSON.stringify([data.runs,data.tasks,data.agents,data.runtime?.providers,data.runtime?.models,hb.signature()]);
-  const old=stateSignature();
-  await refresh(false);
-  if(route==='chat') co.update();
-  else if(!modal.open&&!document.activeElement?.closest('form')&&old!==stateSignature()) renderMain();
-},1500);
+// Polling: one timer at a time, paced by activity (fast while work runs or just changed, slow when idle), paused while the tab is hidden.
+const hasActiveRuns=()=>(data?.runs||[]).some(r=>r.status==='running'||r.status==='queued');
+async function pollCycle() {
+  if(mode!=='local'||!data||document.hidden||inflight) return;
+  const result=await refresh(false);
+  paint(result,{poll:true});
+  maybeSaveCache();
+}
+function schedulePoll() {
+  clearTimeout(pollTimer);pollTimer=0;
+  const delay=pollDelay({hidden:document.hidden,active:hasActiveRuns(),sinceChange:Date.now()-lastChangeAt,failures:pollFailures});
+  if(delay===null) return;
+  pollTimer=setTimeout(async()=>{pollTimer=0;try {await pollCycle();} finally {schedulePoll();}},delay);
+}
+/** The last state is kept in IndexedDB (at most every 30 s while changing, and when the tab is hidden) so a reload can paint at once. */
+function maybeSaveCache(force=false) {
+  if(mode!=='local'||!data||!cacheDirty||(!force&&Date.now()-cacheSavedAt<30000)) return;
+  const copy=cacheable(data);if(!copy) return;
+  cacheDirty=false;cacheSavedAt=Date.now();saveCachedState(CACHE_KEY,copy);
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden) {clearTimeout(pollTimer);pollTimer=0;maybeSaveCache(true);return;}
+  lastChangeAt=Date.now();   // coming back: look again right away and keep the faster pace for a while
+  clearTimeout(pollTimer);pollTimer=setTimeout(async()=>{pollTimer=0;try {await pollCycle();} finally {schedulePoll();}},0);
+});
+window.addEventListener('pagehide',()=>maybeSaveCache(true));
+window.__afPollNow=async()=>{while(inflight) await inflight.catch(()=>{});return pollCycle();};   // lets a test or profiler run one poll cycle on demand
 setInterval(()=>{if(route==='automations'&&!document.hidden) hb.tick();},1000);
-boot();
+boot().then(()=>{maybeSaveCache(true);schedulePoll();});

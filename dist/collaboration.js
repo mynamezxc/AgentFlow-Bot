@@ -9,9 +9,10 @@ import {messageFilesMarkup,resolveFiles} from './message-files.js';
 import {setupLightbox} from './lightbox.js';
 import {openImageStudio} from './image-studio.js';
 import {galleryMarkup,galleryTiles,imageCard} from './rich-content.js';
-import {isActivity,renderWorkLog} from './worklog.js';
+import {isActivity,renderWorkLog,renderWorkLogRows,buildLogExtras,mergeLog} from './worklog.js';
 import {budgetMarkup,budgetSummary,projectRoot} from './budget-ui.js';
 import {chooseProject,roomProjects,goalsMarkup,forYouFiles,changedAfterForYou,agentEventMarkup} from './right-bar.js';
+import {createFormatCache,prependMessages} from './state-sync.js';
 import {morph,compactFolders,groupChanges,limitRows,rosterGroups,rosterMatches,isImagePath,GROUP_THRESHOLD} from './layout.js';
 export function createCollaboration(h) {
   setupUsagePopovers();setupLightbox();ensureTicker();
@@ -25,7 +26,11 @@ export function createCollaboration(h) {
   let contextOpen=matchMedia('(min-width:1101px)').matches, transcriptKey='', rosterKey='', contextKey='';
   const sectionOpen={progress:true,outputs:true,budget:true,context:true},uploads=new Map();
   let composerFrame=0,composerInput=null,composerSizeKey='',decisionIndex=-1,decisionCount=0,decisionBarKey='';
-  const pulsed=new Set(),replyOpen=new Set(),groupOpen=new Set(),skillDrafts=new Map();
+  const pulsed=new Set(),replyOpen=new Set(),groupOpen=new Set(),logOpen=new Set(),skillDrafts=new Map();
+  // The transcript shows the newest WINDOW messages; "Load earlier" widens it (and fetches older ones from the runtime when the page has none left).
+  const WINDOW=150,fmtCache=createFormatCache(1500),exhausted=new Set();
+  const earliest=new Map();   // channel -> oldest message id loaded so far (where the next older page starts)
+  let windowRoom='',windowLimit=WINDOW,lastPaint={key:'',at:0},metaRef=null,firstPaint=true;
   const draftSkills=(key=room())=>{if(!skillDrafts.has(key)) skillDrafts.set(key,[]);return skillDrafts.get(key);};
   const composerObserver=new ResizeObserver(()=>resizeComposer());
   function resizeComposer() {
@@ -129,7 +134,7 @@ export function createCollaboration(h) {
   const saveCollapsed=()=>{try{localStorage.setItem(ROSTER_KEY,JSON.stringify([...rosterCollapsed]));}catch{}};
   const pluralDecisions=n=>n+(n===1?' decision needs':' decisions need')+' you';
   function rosterRow(a,grouped) {
-    const latest=list('messages').filter(m=>m.channel==='dm-'+a.id&&ownerVisible(m,d().runs)).at(-1);
+    const latest=list('messages').filter(m=>m.channel==='dm-'+a.id&&ownerVisible(m,d().runs)&&!isActivity(m)).at(-1);
     const pending=questions().filter(q=>q.agent_id===a.id).length;
     const active=list('runs').find(r=>r.agent_id===a.id&&!terminal.has(r.status));
     const waiting=quotaWait(a.current_action)&&active?.kind!=='peer';
@@ -183,6 +188,16 @@ export function createCollaboration(h) {
     if(start>=0) {try {content=JSON.parse(content.slice(start)).reply||content;}catch{}}
     return renderMarkdown(content,{agents:d().agents,artifacts:list('artifacts').filter(a=>!projectId||a.project_id===projectId),attachments:list('attachments').filter(a=>!projectId||a.project_id===projectId)});
   }
+  /** Markdown for a transcript message, cached by message id + version (the cache also resets when agents, artifacts or attachments change). */
+  function formatCached(content,projectId,key) {
+    const project=projectId===undefined?roomProject()?.id:projectId;
+    return fmtCache.get(key+':'+(project||''),()=>format(content,projectId));
+  }
+  function cacheDeps() {
+    if(d().meta!==metaRef) {metaRef=d().meta;earliest.clear();exhausted.clear();}   // a full reload replaced the window
+    const sum=k=>(d()[k]||[]).reduce((n,x)=>n+(x.version||0),0);
+    fmtCache.setDeps((d().agents||[]).map(a=>a.id+'='+a.name).join('|')+'#'+(d().artifacts||[]).length+':'+sum('artifacts')+'#'+(d().attachments||[]).length+':'+sum('attachments'));
+  }
   function decision(q) {
     if(!q) return '';
     const who=actor(q.agent_id);
@@ -195,14 +210,44 @@ export function createCollaboration(h) {
     const open=[...new Set(inline)].map(id=>list('decisions').find(q=>q.id===id)).filter(q=>q?.status==='open');
     return {rendered,extra,open:[...open,...extra]};
   }
+  const shortName=id=>String(actor(id).name||'').split(/\s[-–—]\s/)[0];
+  // Collapsed work logs are rendered without their rows (they would dominate the DOM); the rows are built when a log is opened.
+  const logStore=new Map();   // log key -> entries, rebuilt on every transcript()
+  const logHelpers=()=>({esc,icon,stamp,format:(text,pid)=>formatCached(text,pid,'w:'+text),agentName:id=>shortName(id),nameOf:id=>shortName(id),mainId:selected().id,
+    avatar:id=>avatar(actor(id),'mini'),expanded:key=>logOpen.has(key)});
   function workLog(entries) {
-    return renderWorkLog(entries,{esc,icon,stamp,format,agentName:id=>id!==selected().id?actor(id).name:''});
+    logStore.set('log:'+(entries[0].id||''),entries);
+    return renderWorkLog(entries,{...logHelpers(),lazy:true});
   }
+  function fillLog(details) {
+    const body=details.querySelector(':scope>ol[data-lazy]'),entries=logStore.get(details.dataset.key);
+    if(!body||!entries) return;
+    body.innerHTML=renderWorkLogRows(entries,logHelpers());body.removeAttribute('data-lazy');
+  }
+  /** Index of the first message in the window: the newest `limit` owner-visible items plus the activity between them. */
+  function windowStart(all,limit) {
+    let seen=0,i=all.length;
+    while(i>0&&seen<limit) {i--;if(!isActivity(all[i])) seen++;}
+    return i;
+  }
+  // The runtime says which channels have messages older than the loaded window (meta.messages.older).
+  const canFetchEarlier=()=>{
+    const info=d().meta?.messages;
+    return h.getMode()!=='demo'&&!!info&&!exhausted.has(room())&&(earliest.has(room())||(info.older||[]).includes(room()));
+  };
   function transcript() {
-    const msgs=roomMessages(),shown=new Set(msgs.filter(m=>m.kind==='decision').map(m=>m.decision_id)),items=[],doneShown=new Set();
+    cacheDeps();logStore.clear();
+    if(windowRoom!==room()) {windowRoom=room();windowLimit=WINDOW;}
+    // The very first paint shows only the newest 40 items so the workspace appears quickly; the full window follows right after.
+    const everything=roomMessages(),start=windowStart(everything,firstPaint?Math.min(windowLimit,40):windowLimit),msgs=start?everything.slice(start):everything;
+    const shown=new Set(msgs.filter(m=>m.kind==='decision').map(m=>m.decision_id)),items=[],doneShown=new Set();
     const find=id=>list('decisions').find(q=>q.id===id);
+    // Owner-visible messages plus the room's team activity (run notes, tool calls, internal messages), merged chronologically; both fold into work-log streaks.
+    let extras=buildLogExtras({room:room(),messages:list('messages'),runs:list('runs')});
+    if(start&&msgs[0]) {const from=Date.parse(msgs[0].created_at)||0;extras=extras.filter(e=>(Date.parse(e.created_at)||0)>=from);}
+    const flow=mergeLog(msgs,extras);
     const push=(html,open=false,id='')=>{if(html) items.push({html,open,id});};
-    for(const m of msgs) {
+    for(const m of flow) {
       if(m.kind==='decision') {
         const q=find(m.decision_id);
         if(q&&!doneShown.has(q.id)){doneShown.add(q.id);push(decision(q),q.status==='open',q.id);}
@@ -227,16 +272,18 @@ export function createCollaboration(h) {
       // Only what the owner needs: step narration folds into one collapsed work log per streak.
       if(isActivity(m)) {
         const last=items[items.length-1];
-        if(last?.log) {last.log.push(m);last.html=workLog(last.log);} else items.push({html:workLog([m]),open:false,id:'',log:[m]});
+        if(last?.log) last.log.push(m);else items.push({html:'',open:false,id:'',log:[m]});
         continue;
       }
       const peer=m.agent_id!==selected().id&&m.role!=='user';
       push('<article class="co-message '+(m.role==='user'?'from-user':'from-agent')+(peer?' peer-message':'')+(m.kind==='error'?' message-error':'')+'">'+
         (m.role!=='user'?'<div class="message-byline">'+agentMention(actor(m.agent_id))+'<time>'+stamp(m.created_at)+'</time></div>':'')+
-        '<div class="message-body">'+format(m.content,m.project_id)+attachmentMarkup((m.attachment_ids||[]).map(id=>(d().attachments||[]).find(a=>a.id===id)).filter(Boolean),false)+messageFilesMarkup(resolveFiles(m.artifact_ids,list('artifacts')),esc)+'</div></article>');
+        '<div class="message-body">'+formatCached(m.content,m.project_id,m.id+':'+m.version)+attachmentMarkup((m.attachment_ids||[]).map(id=>(d().attachments||[]).find(a=>a.id===id)).filter(Boolean),false)+messageFilesMarkup(resolveFiles(m.artifact_ids,list('artifacts')),esc)+'</div></article>');
     }
     for(const q of chatDecisions(msgs).extra) push(decision(q),true,q.id);
+    for(const item of items) if(item.log) item.html=workLog(item.log);   // one render per streak, after it is complete
     let result=groupDecisions(items,{limit:3,expanded:id=>groupOpen.has(id),esc});
+    const earlier=result&&(start||canFetchEarlier())?'<div class="load-earlier"><button type="button" class="button quiet small" data-action="co-earlier">Load earlier messages'+(start?' ('+start+' more here)':'')+'</button></div>':'';
     if(!result) result='<div class="co-welcome"><span class="welcome-mark">'+icon('spark')+'</span><span class="eyebrow">ONE GOAL. ONE TEAM.</span><h1>Assign work to '+esc(selected().name)+'.</h1><p>'+esc(selected().role)+'. The team plans, delegates, collaborates and brings results here.</p><div class="welcome-prompts">'+
       ['Create a product launch team: planner, writer, designer and tester. Delegate work, build the required skills and ask me about missing decisions.','Review project documents, identify improvements and coordinate SEO and content for a launch plan.'].map((text,i)=>'<button data-action="suggestion" data-id="'+esc(text)+'">'+icon(i?'folder':'team')+'<span>'+(i?'Prepare a project launch':'Build a team for a goal')+'</span>'+icon('arrow')+'</button>').join('')+'</div></div>';
     const runs=roomRuns();
@@ -245,10 +292,10 @@ export function createCollaboration(h) {
     const nowMs=Date.now(),act=runs.length?lastActivity({runs:list('runs'),messages:list('messages'),channel:room(),roomRuns:runs}):null;
     const limit=(Number(d().settings?.model_call_timeout_seconds)||0)*1000||THINK_LIMIT_MS;
     const quiet=!!act&&act.ts!==null&&activityText(act.iso,nowMs,{warn:act.progressing,since:act.since,limit}).stalled;
-    const newest=msgs.at(-1);
+    const newest=msgs.filter(m=>!isActivity(m)).at(-1);
     if(newest?.created_at) result+='<p class="latest-time'+(newest.role==='user'?' is-user':'')+'">'+reltimeMarkup({ts:newest.created_at,mode:'ago',esc,now:nowMs,title:stamp(newest.created_at)})+'</p>';
     result+=runs.length?'<div class="live-work'+(waiting?' is-quota-wait':'')+(quiet?' is-stalled':'')+(stuck?' is-stuck':'')+'" role="status">'+(waiting?icon('clock'):'<span class="working-orb"></span>')+'<span>'+esc(liveText)+(runs.length>1?' · '+runs.length+' work runs':'')+(act&&act.ts!==null?reltimeMarkup({ts:act.iso,mode:'activity',esc,now:nowMs,warn:act.progressing,since:act.since,limit}):'')+'</span>'+(stuck?button('Resume','co-unstick',stuck.rootId,'small primary'):'')+button('Stop this branch','co-cancel',runs[0].id,'quiet small')+'</div>':'';
-    return result;
+    return earlier+result;
   }
   const lastSegmentsOf=path=>compactFolders([path]).rows[0]?.label||String(path||'');
   const ACCESS_TEXT={R:'Read only',RW:'Read & write'};
@@ -453,9 +500,19 @@ export function createCollaboration(h) {
       '<div class="composer-area">'+decisionBarMarkup()+'<form id="chat-form" class="co-composer" novalidate><input type="hidden" name="agent_id" value="'+esc(a.id)+'"><input id="chat-attachments" type="file" multiple hidden accept=".png,.jpg,.jpeg,.webp,.txt,.md,.csv,.json,.xml,.yaml,.yml,.toml,.html,.css,.js,.ts,.tsx,.jsx,.py,.sql,.log,.svg,.pdf,.docx,.xlsx,.pptx"><div id="composer-attachments">'+attachmentMarkup(draftFiles(),true)+'</div><div id="composer-skills" class="composer-skills" aria-label="Skills for this message">'+skillChipsMarkup(draftSkills(),esc)+'</div><label class="sr-only" for="chat-input">Message '+esc(a.name)+'</label><textarea id="chat-input" name="message" rows="2" placeholder="Describe a goal, ask a question, or type / for commands…" aria-haspopup="listbox" maxlength="20000"></textarea><div class="composer-tools"><button class="icon-button" type="button" data-action="co-attach" aria-label="Attach images or files" title="Images, documents or code · Up to 6 files">'+icon('plus')+'</button><button class="icon-button" type="button" data-action="co-image-studio" aria-label="Generate an image" title="Image Studio">'+icon('image')+'</button><span>Self-coordinating team · Asks when decisions are needed</span>'+approvalChip()+'<button type="button" id="co-model-binding" class="model-binding" data-action="co-model" data-id="'+esc(a.id)+'" aria-label="Model & reasoning">'+icon('spark')+'<span>'+esc(modelLabel(a))+'</span>'+icon('down')+'</button><button class="composer-send" type="submit" aria-label="Send message">'+icon('arrow')+'</button></div><p id="chat-error" class="inline-error" role="alert"></p></form><div id="chat-usage">'+usageMini(withRetained(d().runtime?.providers),esc)+'</div><div class="composer-note">Enter to send · Shift + Enter for a new line · / for commands · Paste images or drop files</div></div></section>'+
       '<aside id="co-context" class="work-context" aria-label="Work and files"><header><h2>Work & files</h2><button class="icon-button" data-action="co-context" aria-label="Close work panel">'+icon('close')+'</button></header><div id="co-context-body" tabindex="-1">'+context()+'</div></aside></div>'+afterView();
   }
-  function afterView() {slash.close();queueMicrotask(()=>previewPane.attach($('.co-chat')));setTimeout(()=>{pulseNewDecisions();syncApproval();},0);return '';}
-  function update() {
+  function afterView() {if(firstPaint) requestAnimationFrame(()=>setTimeout(()=>{firstPaint=false;transcriptKey='';update();},0));slash.close();queueMicrotask(()=>previewPane.attach($('.co-chat')));setTimeout(()=>{pulseNewDecisions();syncApproval();},0);return '';}
+  /**
+   * Repaint from the current data. A poll passes {poll:true, stamp}: when the stamp (revision + runtime) and the room are what was
+   * painted last, nothing on screen can differ except time-based text, so it only repaints now and then while work is open.
+   */
+  function update(opts) {
     resizeComposer();
+    if(opts?.poll) {
+      const key=[opts.stamp,room(),rosterQuery,contextOpen].join('|');
+      const open=(d().runs||[]).some(r=>!terminal.has(r.status));
+      if(key===lastPaint.key&&transcriptKey&&rosterKey&&Date.now()-lastPaint.at<(open?10000:45000)) return;
+      lastPaint={key,at:Date.now()};
+    } else lastPaint={key:'',at:Date.now()};
     const usage=$('#chat-usage');if(usage)updateUsage(usage,d().runtime?.providers,esc);
     syncApproval();
     const label=$('#co-model-binding span');
@@ -471,7 +528,9 @@ export function createCollaboration(h) {
       const detailKey=x=>x.dataset.key||x.querySelector('summary')?.textContent;
       const opened=[...el.querySelectorAll('details[open]')].map(detailKey);
       el.innerHTML='<div class="transcript-inner">'+markup+'</div>';
-      el.querySelectorAll('details').forEach(x=>x.open=opened.includes(detailKey(x)));
+      const wasOpen=x=>opened.includes(detailKey(x));
+      el.querySelectorAll('details.work-log').forEach(x=>{if(wasOpen(x)){x.open=true;fillLog(x);}});   // fill first: its inner details are restored below
+      el.querySelectorAll('details:not(.work-log)').forEach(x=>x.open=wasOpen(x));
       el.scrollTop=bottom?el.scrollHeight:oldScroll;
       transcriptKey=stableMarkup(markup);
     }
@@ -485,6 +544,22 @@ export function createCollaboration(h) {
       const code=body.querySelector('.diff-view,.file-content');if(code)code.scrollTop=codeScroll;
       if(control) [...body.querySelectorAll('[data-action]')].find(el=>el.dataset.action===control.action&&el.dataset.id===control.id)?.focus({preventScroll:true});
     }
+  }
+  /** Widen the transcript window; when the page holds no more local messages, fetch an older page from the runtime first. */
+  async function loadEarlier(button) {
+    const channel=room(),el=$('#co-transcript'),fromBottom=el?el.scrollHeight-el.scrollTop:0;
+    const hidden=windowStart(roomMessages(),windowLimit)>0;
+    if(!hidden&&canFetchEarlier()) {
+      if(button) button.disabled=true;
+      const before=earliest.get(channel)||d().meta?.messages?.first?.[channel];
+      const page=await h.api('/messages?channel='+encodeURIComponent(channel)+(before?'&before='+encodeURIComponent(before):'')+'&limit=100',undefined,'GET');
+      prependMessages(d(),page.messages);
+      if(page.messages.length) earliest.set(channel,page.messages[0].id);
+      if(!page.more) exhausted.add(channel);
+    }
+    windowLimit+=WINDOW;
+    transcriptKey='';update();
+    if(el) el.scrollTop=el.scrollHeight-fromBottom;   // keep what the owner was reading in place
   }
   async function answer(id,text,form,grant) {
     if(!text?.trim()) throw new Error('Select an option or enter an answer.');
@@ -545,6 +620,8 @@ export function createCollaboration(h) {
           if(show){replyOpen.add(id);box.querySelector('input')?.focus();}else replyOpen.delete(id);
         }
       }
+      if(action==='wl-earlier') {logOpen.add(id);transcriptKey='';update();}
+      if(action==='co-earlier') await loadEarlier(target);
       if(action==='co-decision-more') {
         if(groupOpen.has(id)) groupOpen.delete(id);else groupOpen.add(id);
         if(document.activeElement?.closest('.decision-group')) document.activeElement.blur();
@@ -638,7 +715,10 @@ export function createCollaboration(h) {
     }
     return false;
   }
-  document.addEventListener('toggle',event=>{if(event.target.matches?.('.detail-section,.goal-done,.output-sub'))sectionOpen[event.target.dataset.section]=event.target.open;},true);
+  document.addEventListener('toggle',event=>{
+    if(event.target.matches?.('.detail-section,.goal-done,.output-sub'))sectionOpen[event.target.dataset.section]=event.target.open;
+    if(event.target.matches?.('details.work-log[open]')) fillLog(event.target);
+  },true);
   document.addEventListener('input',event=>{if(event.target.id==='roster-search'){rosterQuery=event.target.value;syncRoster();}});
   document.addEventListener('input',event=>{if(event.target.id==='chat-input'){resizeComposer();slash.sync(event.target);}});
   // Capture phase: the slash menu must see Enter/Tab/arrows before the Enter-to-send handler.

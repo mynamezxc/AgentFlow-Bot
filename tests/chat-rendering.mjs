@@ -15,6 +15,9 @@ assert.equal(ownerVisible({kind:'handoff'}),false);
 assert.equal(ownerVisible({kind:'chat',run_id:'peer'},[{id:'peer',kind:'peer'}]),false);
 assert.equal(ownerVisible({kind:'chat',audience:'owner'}),true);
 assert.equal(ownerVisible({kind:'chat',audience:'internal'}),false);
+assert.equal(ownerVisible({kind:'progress',audience:'activity'}),true);   // renders only inside the collapsed work log
+assert.equal(ownerVisible({kind:'action',audience:'activity'}),true);
+assert.equal(ownerVisible({kind:'peer_reply',audience:'internal'}),false);
 assert.equal(faceFor('a-lead'),'smile');
 assert.ok(agentAvatar({id:'a-b',face:'<script>',color:'bad class'}).includes('purple'));
 assert.ok(formatMessage('Iris xin quyền',[{id:'iris',name:'Iris - Designer'}]).includes('data-id="iris"'));
