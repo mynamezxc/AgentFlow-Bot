@@ -1,0 +1,5 @@
+# Native tools are denied. The runtime separately validates brokered tool calls.
+[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 100

@@ -1,0 +1,15 @@
+# Normalize text in the repository; keep Windows scripts CRLF so they run when double-clicked.
+* text=auto
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.sh text eol=lf
+
+# Binary files: never diff or convert.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff2 binary

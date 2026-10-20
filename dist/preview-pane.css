@@ -1,0 +1,74 @@
+/* Dedicated file preview pane: sits between the conversation and the right bar. */
+.co-chat.with-preview{--pane-w:50%;grid-template-columns:minmax(360px,1fr) var(--pane-w)}
+.co-chat.with-preview.with-context{grid-template-columns:minmax(360px,1fr) var(--pane-w) 350px}
+.co-chat.with-preview .conversation{min-width:0}
+.co-chat.with-preview .composer-tools>span{display:none}
+.preview-pane{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--surface,#fff);border-left:1px solid var(--border,#e8eaf1);overflow:hidden}
+.preview-pane[hidden]{display:none}
+.pp-handle{position:absolute;left:-3px;top:0;bottom:0;width:7px;cursor:col-resize;z-index:3;touch-action:none;background:transparent}
+.pp-handle::after{content:'';position:absolute;left:3px;top:0;bottom:0;width:2px;background:transparent;transition:background .12s}
+.pp-handle:hover::after,.pp-handle:focus-visible::after,.is-resizing-preview .pp-handle::after{background:var(--primary,#7055d8)}
+.pp-handle:focus-visible{outline:2px solid var(--primary,#7055d8);outline-offset:-2px}
+.pp-head{display:flex;align-items:stretch;gap:6px;min-height:46px;border-bottom:1px solid var(--border,#e8eaf1);background:var(--background,#f6f7fb);flex-shrink:0;padding-left:6px}
+.pp-tabs{display:flex;align-items:flex-end;gap:2px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:thin;padding-top:7px}
+.pp-tab{display:flex;align-items:center;min-width:0;max-width:200px;flex:0 1 auto;border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;background:transparent;color:var(--muted,#697389)}
+.pp-tab:hover{background:#7055d80d}
+.pp-tab.is-active{background:var(--surface,#fff);border-color:var(--border,#e8eaf1);color:var(--ink,#20283f);margin-bottom:-1px}
+.pp-tab-main{display:flex;align-items:center;gap:6px;min-width:0;padding:8px 4px 8px 10px;border:0;background:transparent;font:inherit;font-size:11px;color:inherit;text-align:left;cursor:pointer}
+.pp-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.pp-dot{display:none;width:7px;height:7px;border-radius:50%;background:var(--primary,#7055d8);flex-shrink:0}
+.pp-tab.is-dirty .pp-dot,.pp-dot.is-on{display:inline-block}
+.pp-tab-close{display:grid;place-items:center;width:22px;height:22px;margin-right:4px;border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer;flex-shrink:0}
+.pp-tab-close:hover{background:#7055d81a}
+.pp-tab-close svg{width:11px;height:11px}
+.pp-actions{display:flex;align-items:center;gap:2px;padding-right:8px;flex-shrink:0}
+.pp-actions .icon-button:disabled{opacity:.4;cursor:not-allowed}
+.pp-file{display:flex;flex-direction:column;flex:1;min-height:0}
+.pp-meta{padding:12px 16px 8px;flex-shrink:0}
+.pp-meta h3{font-size:13px;line-height:1.5;overflow-wrap:anywhere;margin:0}
+.pp-meta .preview-path{margin:2px 0 0;padding:0;font-size:10px;color:var(--muted,#697389);overflow-wrap:anywhere}
+.pp-meta .preview-meta{display:flex;align-items:center;gap:8px;margin:6px 0 0;padding:0}
+.pp-views{flex-shrink:0;border-top:1px solid var(--border,#e8eaf1)}
+.pp-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto}
+.pp-note{padding:14px 16px}
+.pp-body>.inline-error{margin:14px 16px 8px}
+.pp-body>.button{margin:0 16px}
+.pp-body .markdown-preview{padding:16px 20px;font-size:12px;overflow:auto}
+.pp-body .diff-view,.pp-body .file-content{max-height:none;flex:1;min-height:0}
+.pp-body .file-content{padding:14px 18px}
+.pp-pick{margin:10px 16px 0;padding:6px 8px;border:1px solid var(--border,#e8eaf1);border-radius:8px;background:var(--surface,#fff);font:inherit;font-size:11px;color:var(--ink,#20283f);flex-shrink:0}
+.pp-edit{display:flex;flex-direction:column;flex:1;min-height:0}
+.pp-toolbar{display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--border,#e8eaf1);flex-shrink:0}
+.pp-status{font-size:10px;color:var(--muted,#697389);margin-left:auto}
+.pp-editor{flex:1;min-height:0;width:100%;resize:none;border:0;border-radius:0;padding:14px 18px;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2;white-space:pre;overflow:auto;background:var(--surface,#fff);color:var(--ink,#20283f);outline:0}
+.pp-editor:focus-visible{box-shadow:inset 0 0 0 2px #7055d855}
+.pp-conflict{margin:8px 16px;padding:10px 12px;border:1px solid #e4c693;background:#fff6e6;border-radius:9px;font-size:11px;color:#6d4b0d;flex-shrink:0}
+.pp-conflict p{margin:0 0 8px}
+.pp-edit>.inline-error{margin:8px 16px}
+.pp-frame{flex:1;min-height:0;width:100%;height:100%;border:0;background:#fff;display:block}
+.pp-body[data-view=preview]>.canvas-notice{flex-shrink:0}
+.pp-imagebar{padding:8px 16px;border-bottom:1px solid var(--border,#e8eaf1);flex-shrink:0}
+.pp-image{flex:1;min-height:0;overflow:auto;display:grid;place-items:center;padding:12px;background:var(--background,#f6f7fb)}
+.pp-image img{display:block}
+.pp-image.is-fit img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain}
+.pp-image.is-actual{place-items:start}
+.pp-image.is-actual img{max-width:none;width:auto;height:auto}
+.preview-pane .native-document{padding:36px 20px}
+/* Maximize: the pane takes the whole chat area; the conversation and the work panel step aside. */
+.co-chat.preview-max,.co-chat.preview-max.with-context{grid-template-columns:minmax(0,1fr)}
+.co-chat.preview-max .conversation,.co-chat.preview-max .work-context{display:none}
+.co-chat.preview-max .pp-handle{display:none}
+.co-chat.is-resizing-preview{user-select:none;cursor:col-resize}
+.co-chat.is-resizing-preview iframe{pointer-events:none}
+.output-row.is-previewed{background:#7055d81a;border-color:#cdbff3}
+.output-row.is-previewed>svg{color:var(--primary,#7055d8)}
+@media(max-width:1100px){
+  .co-chat.with-preview.with-context{grid-template-columns:minmax(360px,1fr) var(--pane-w)}
+}
+@media(max-width:899px){
+  .co-chat.with-preview,.co-chat.with-preview.with-context{grid-template-columns:minmax(0,1fr)}
+  .co-chat.with-preview .preview-pane{position:fixed;inset:0;z-index:60;width:auto;border-left:0}
+  .pp-handle{display:none}
+  .pp-actions [data-pp=max]{display:none}
+}
+@media(prefers-reduced-motion:no-preference){.pp-handle::after{transition:background .12s}}
